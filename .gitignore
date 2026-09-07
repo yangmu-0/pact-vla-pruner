@@ -1,0 +1,14 @@
+# Upstream Git repositories, checkpoints and full experiment history are kept
+# on disk and inventoried in provenance, not duplicated into the root index.
+/vendor/
+/dependencies/
+/references/
+/checkpoints/
+/LIBERO
+/experiments/
+/runs/
+/provenance/
+/.locks/
+__pycache__/
+*.py[cod]
+.pytest_cache/

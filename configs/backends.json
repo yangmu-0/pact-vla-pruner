@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "conda_root": "/home/ubuntu/miniconda3",
+  "backends": {
+    "native_openvla": {"cwd": "vendor/vla-pruner/src/openvla", "environment": "vla-pruner", "transformers": "vendor/vla-pruner/src/openvla/transformers/src"},
+    "native_oft": {"cwd": "vendor/vla-pruner/src/openvla-oft", "environment": "vla-oft-official", "transformers": "vendor/vla-pruner/src/openvla-oft/transformers/src"},
+    "cache_openvla": {"cwd": "vendor/vla-cache/src/openvla", "environment": "vla-cache-openvla", "transformers": null},
+    "cache_oft": {"cwd": "vendor/vla-cache/src/openvla-oft", "environment": "vla-cache-oft", "transformers": null}
+  }
+}
