@@ -5,18 +5,18 @@
 ## 范围与实验身份
 
 - 模型：OpenVLA、OpenVLA-OFT。
-- 方法：Vanilla、FastV、SparseVLM、DivPrune、VLA-Cache、VLA-Pruner。
-- 剪枝率：25%、50%、75%、87.5%，分别保留 75%、50%、25%、12.5%。VLA-Cache 的比率是 `local_fixed_reuse_v2` 目标最终复用率，不是真正删除 token；首次调用/缓存重置仍全量计算。
+- 方法：Vanilla、FastV、SparseVLM、DivPrune、VLA-Cache、VLA-Pruner，以及仅支持 OpenVLA-OFT 的 PACT-VLA。
+- 固定剪枝率：25%、50%、75%、87.5%，分别保留 75%、50%、25%、12.5%。PACT-VLA 不使用固定剪枝率，而是在每次调用时从保留率 12.5%、25%、50%、75%、100% 中动态选择。VLA-Cache 的比率是 `local_fixed_reuse_v2` 目标最终复用率，不是真正删除 token；首次调用/缓存重置仍全量计算。
 - 套件：LIBERO Spatial、Object、Goal、Long（`libero_10`），每套件全部任务 0–9。
 - 每任务 3 episodes，使用既有 evaluator 的初态索引 0、1、2，seed=7。每条件 30 episodes。
-- 主表：2 × (1 + 5 × 4) × 4 = 168 条件。额外 DivPrune 和 VLA-Cache 的匹配 Vanilla：2 × 2 × 4 = 16 条件。合计 184 条件、5520 episodes。
+- 主表：2 × (1 + 5 × 4) × 4 + 1 × 1 × 4 = 172 条件，其中最后 4 条是 OFT PACT-VLA 自适应条件。额外 DivPrune 和 VLA-Cache 的匹配 Vanilla：2 × 2 × 4 = 16 条件。合计 188 条件、5640 episodes。
 - 论文是每任务 50 次，本次按用户要求缩减到 3 次。这是覆盖全部方法/套件/比例的缩小样本量复测，不具备原表相同的统计精度。每套件成功率最小步长为 3.33 个百分点；不针对这三个初态调参。
 
 ## 配置与边界
 
 沿用新入口已验证的实现和环境，不因为成功率高低修改模型/任务。OpenVLA native 和 DivPrune 保持 `use_cache=False`；VLA-Cache 必须使用其专用缓存路径，不能把全矩阵强制为 `--decode-cache off`。`--decode-cache auto` 会做上述分流。OFT 为双相机图像、proprio、L1 head、8-action chunk，不启用 FiLM/diffusion。
 
-`use_prefil_attention=False`；FastV/SparseVLM/VLA-Pruner 的 CLI prune layer=3。VLA-Pruner 的时序 warmup、当前 attention 汇总实现保持现状，由实际源码哈希和配置记录标识，不宣称与论文未公开协议完全等价。DivPrune 保留现有 pre-LLM 适配和官方 max-min 算法对照。VLA-Cache 固定复用适配是本地实现，不冒充作者确认的原表实现。
+`use_prefil_attention=False`；FastV/SparseVLM/VLA-Pruner 的 CLI prune layer=3。PACT-VLA 沿用已验证实现的 prefill attention、layer=15 语义/动作配置和自适应控制器参数。VLA-Pruner 的时序 warmup、当前 attention 汇总实现保持现状，由实际源码哈希和配置记录标识，不宣称与论文未公开协议完全等价。DivPrune 保留现有 pre-LLM 适配和官方 max-min 算法对照。VLA-Cache 固定复用适配是本地实现，不冒充作者确认的原表实现。
 
 每个条件使用独立进程，按顺序共享 GPU0；24 个基线条件先执行，再按方法和比例执行。已有暂停实验继续保持暂停。短测和失败尝试留在各自目录，不与正式结果混合。
 
@@ -52,9 +52,9 @@
 
 ## 输出和重启
 
-- `summary.csv`：184 条件各自的状态、episodes、成功率、延迟、FLOPs 和匹配加速比。
-- `table1.csv`：42 行主表，列出四套件原始成功率、Acc、FLOPs、Latency 和补充口径。
-- `table1_with_backend_baselines.csv`：包含四种额外后端 Vanilla 行，共 46 行。
+- `summary.csv`：188 条件各自的状态、episodes、成功率、延迟、FLOPs 和匹配加速比。
+- `table1.csv`：43 行主表，列出四套件原始成功率、Acc、FLOPs、Latency 和补充口径；PACT-VLA 的固定剪枝率/保留率列留空，避免伪造单一预算标签。
+- `table1_with_backend_baselines.csv`：包含四种额外后端 Vanilla 行，共 47 行。
 - `metric_definitions.json`：机器可读口径。
 - 每 attempt 的 `policy_timing_calls.csv`、`flops_profile_samples.jsonl`、`token_audit.jsonl`、`result.json`、`environment.json` 和原始日志：审计依据。
 

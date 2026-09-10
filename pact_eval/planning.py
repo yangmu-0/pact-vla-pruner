@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 MODELS = ('openvla', 'oft')
-STRATEGIES = ('vanilla', 'fastv', 'sparsevlm', 'divprune', 'vla-cache', 'vla-pruner')
+STRATEGIES = ('vanilla', 'fastv', 'sparsevlm', 'divprune', 'vla-cache', 'vla-pruner', 'pact-vla')
 SUITES = {'spatial': ('libero_spatial', 'spatial'), 'object': ('libero_object', 'object'),
           'goal': ('libero_goal', 'goal'), 'long': ('libero_10', '10')}
 
@@ -35,6 +35,15 @@ def ratio(value):
         raise ValueError('Ratios must be strictly between 0 and 1 (or 0% and 100%). Use vanilla for zero.')
     return number
 
+def pact_budget_rates(value):
+    try:
+        rates = tuple(float(part.strip()) for part in str(value).split(','))
+    except ValueError as error:
+        raise ValueError('--pact-budget-rates must be a comma-separated list of numbers.') from error
+    if not rates or rates != tuple(sorted(set(rates))) or rates[0] <= 0 or rates[-1] != 1.0:
+        raise ValueError('--pact-budget-rates must be sorted, unique, positive, and end in 1.0.')
+    return ','.join(f'{rate:g}' for rate in rates)
+
 def fields_from_file(path):
     tree = ast.parse(path.read_text(encoding='utf-8'))
     config = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'GenerateConfig')
@@ -54,10 +63,13 @@ def baseline_kind(strategy):
     return strategy if strategy in ('divprune', 'vla-cache') else 'native'
 
 def make_jobs(root, args):
+    model_all = [value.lower().replace('_', '-') for value in args.model] == ['all']
+    strategy_all = [value.lower().replace('_', '-') for value in args.strategy] == ['all']
     models = expand(args.model, MODELS)
     strategies = expand(args.strategy, STRATEGIES)
     suites = suite_keys(args.suite)
     ratios = list(dict.fromkeys(ratio(r) for r in args.ratio))
+    pact_rates = pact_budget_rates(args.pact_budget_rates)
     tasks = list(dict.fromkeys(args.task_ids)) if args.task_ids is not None else list(range(10))
     if not tasks or any(i < 0 or i > 9 for i in tasks):
         raise ValueError('--task-ids must be in 0..9 for these LIBERO suites.')
@@ -75,11 +87,18 @@ def make_jobs(root, args):
         kind = args.baseline_backend if strategy == 'vanilla' else baseline_kind(strategy)
         if args.with_baseline and strategy != 'vanilla':
             methods.append(('vanilla', baseline_kind(strategy), 0.0))
-        methods += [(strategy, kind, r) for r in ([0.0] if strategy == 'vanilla' else ratios)]
+        budgets = [0.0] if strategy in ('vanilla', 'pact-vla') else ratios
+        methods += [(strategy, kind, r) for r in budgets]
     for family in models:
+        if family == 'openvla' and strategies == ['pact-vla'] and model_all:
+            continue
         for suite_key in suites:
             suite, suffix = SUITES[suite_key]
             for strategy, kind, pruning in methods:
+                if strategy == 'pact-vla' and family != 'oft':
+                    if model_all or strategy_all:
+                        continue
+                    raise ValueError('PACT-VLA is currently implemented only for --model oft.')
                 key = (family, suite, strategy, kind, pruning)
                 if key in seen:
                     continue
@@ -106,9 +125,17 @@ def make_jobs(root, args):
                                         use_text_vision_selection=strategy == 'sparsevlm', temporal_w=3, temporal_gamma=.8)
                     else:
                         settings.update(use_vla_cache=False, use_vla_pruner=strategy == 'vla-pruner',
-                                        use_pact_vla=False, fastv_attention_source='prefill',
+                                        use_pact_vla=strategy == 'pact-vla', fastv_attention_source='prefill',
                                         vla_pruner_layer=15, vla_pruner_mode='semantic_action',
                                         merge_local_lora_adapter=False)
+                        if strategy == 'pact-vla':
+                            # PACT is enabled by the pruning path's positive fastv_r gate, but
+                            # dynamically chooses the actual retention rate at runtime.
+                            settings.update(fastv_r=0.5, use_prefil_attention=True,
+                                            pact_budget_rates=pact_rates, pact_beta=1.0,
+                                            pact_theta0=.10, pact_alpha_conflict=.10,
+                                            pact_theta_min=.10, pact_theta_max=.70,
+                                            pact_shrink_hysteresis=2)
                 if family == 'oft':
                     settings.update(num_images_in_input=2, use_proprio=True, num_open_loop_steps=8,
                                     use_l1_regression=True, use_diffusion=False, use_film=False,
@@ -116,15 +143,18 @@ def make_jobs(root, args):
                 for name, value in args.backend_option:
                     name = name.lstrip('-').replace('-', '_')
                     protected = {'pretrained_checkpoint','task_suite_name','num_trials_per_task','seed','local_log_dir',
-                                 'run_id_note','use_fastv','sparsevlm','use_vla_pruner','use_vla_cache','use_pact_vla','fastv_r'}
+                                 'run_id_note','use_fastv','sparsevlm','use_vla_pruner','use_vla_cache','use_pact_vla',
+                                 'fastv_r','pact_budget_rates'}
                     if name in protected:
                         raise ValueError(f'{name} is controlled by the unified CLI; do not override its strategy/denominator.')
                     settings[name] = value
-                budget_label = f'{pruning*100:g}'
+                adaptive = strategy == 'pact-vla'
+                budget_label = 'adaptive' if adaptive else f'{pruning*100:g}'
                 identifier = f'{family}_{suite_key}_{strategy}_{kind}_{budget_label}'
                 jobs.append(dict(id=identifier, model=family, strategy=strategy, backend_kind=kind,
                     suite=suite, suite_key=suite_key, ratio=pruning,
-                    ratio_semantics='target_final_reuse' if strategy == 'vla-cache' else 'visual_pruning',
+                    ratio_semantics=('adaptive_retention' if adaptive else
+                                     'target_final_reuse' if strategy == 'vla-cache' else 'visual_pruning'),
                     task_ids=tasks, trials=args.trials, expected_episodes=len(tasks)*args.trials,
                     mode=args.mode, verify_calls=args.verify_calls, warmup_calls=args.warmup_calls,
                     collect_flops=args.collect_flops, flops_sample_interval=args.flops_sample_interval,

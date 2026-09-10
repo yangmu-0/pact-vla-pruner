@@ -34,10 +34,10 @@ class MetricTests(unittest.TestCase):
     def test_four_rates_and_baselines(self):
         args=evaluate.parser().parse_args('--model all --strategy all --suite all --ratio 25 50 75 87.5 --trials 3 --with-baseline --collect-flops --condition-order method'.split())
         jobs=make_jobs(ROOT,args)
-        self.assertEqual(len(jobs),184)
-        self.assertEqual(sum(j['expected_episodes'] for j in jobs),5520)
+        self.assertEqual(len(jobs),188)
+        self.assertEqual(sum(j['expected_episodes'] for j in jobs),5640)
         self.assertTrue(all(j['strategy']=='vanilla' for j in jobs[:24]))
-        self.assertEqual(len(table_rows(jobs)),42)
+        self.assertEqual(len(table_rows(jobs)),43)
         self.assertTrue(all(r['Acc.(%)'] is None for r in table_rows(jobs)))
 
     def test_table_macro_average_and_partial_guard(self):

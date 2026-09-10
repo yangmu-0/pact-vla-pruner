@@ -21,6 +21,10 @@ python evaluate.py --model openvla --strategy vla-pruner --suite spatial \
   --ratio 87.5 --task-ids 0 3 --trials 1 \
   --prefill-attention false --decode-cache off --with-baseline
 
+# OpenVLA-OFT + PACT-VLA：从候选保留率中逐步动态选择预算
+python evaluate.py --model oft --strategy pact-vla --suite all \
+  --pact-budget-rates 0.125,0.25,0.5,0.75,1.0 --trials 3 --with-baseline
+
 # 只验证推理路径，不把短测当成功率：跨过 OFT 前 3 个 chunk 的 warmup
 python evaluate.py --model oft --strategy divprune --suite long \
   --ratio 75 --task-ids 3 --mode verify --verify-calls 5
@@ -42,10 +46,11 @@ python evaluate.py --model all --strategy all --suite all \
 | `divprune` | 已验证的 pre-LLM 适配，使用官方 max-min 选择算法对照 | 删除视觉 token 比例 | divprune |
 | `vla-cache` | VLA-Cache 后端 + `local_fixed_reuse_v2` | **目标最终缓存复用比例，不是删除比例** | vla-cache |
 | `vla-pruner` | 当前工作树中的 VLA-Pruner 分支 | 删除视觉 token 比例 | native |
+| `pact-vla` | 当前工作树中的 PACT-VLA 自适应预算分支（仅 OpenVLA-OFT） | 运行时从候选**保留率**中动态选择 | native |
 
-`--ratio 50 75 87.5` 等同 `--ratio .5 .75 .875`，对应保留率 50%、25%、12.5%。Vanilla 自动忽略该参数且只运行一次。VLA-Cache 首帧/缓存重置后仍计算全部 token；固定复用适配不是作者公开确认的 Table 1 完整协议。
+`--ratio 50 75 87.5` 等同 `--ratio .5 .75 .875`，对应保留率 50%、25%、12.5%。Vanilla 自动忽略该参数且只运行一次。PACT-VLA 同样只生成一条 adaptive 条件，忽略固定 `--ratio`，候选保留率由 `--pact-budget-rates` 设置；当前没有 OpenVLA（非 OFT）实现。VLA-Cache 首帧/缓存重置后仍计算全部 token；固定复用适配不是作者公开确认的 Table 1 完整协议。
 
-`--with-baseline` 自动为每种实现添加相应 Vanilla，避免跨后端比较。所有方法、两模型、四套件、三档比例：**128 个条件**；补齐 native / DivPrune / VLA-Cache 各自基线后共 **144 个条件**。本次整合只运行有界集成检查，没有自动启动这个完整矩阵。
+`--with-baseline` 自动为每种实现添加相应 Vanilla，避免跨后端比较。所有方法、两模型、四套件、三档固定比例（PACT-VLA 仅 OFT 各套件一条自适应条件）：**132 个条件**；补齐 native / DivPrune / VLA-Cache 各自基线后共 **148 个条件**。本次整合只运行有界集成检查，没有自动启动这个完整矩阵。
 
 默认配置保留既有实验约定：seed=7、center crop、环境等待 10 步；OpenVLA native / DivPrune 的 `use_cache=False`；OFT 为双图像、proprio、L1 head、每次 8 个 action。`use_prefil_attention=False` 默认关闭。VLA-Cache 使用其专用缓存后端，不允许强制 `--decode-cache off`。保留各后端原有物理环境、终止逻辑和动作变换。
 
@@ -88,7 +93,7 @@ python evaluate.py --model all --strategy all --suite all \
   --name table1_all_prune25_50_75_875_trials3_20260831 --tmux
 ```
 
-共 **168 个主表条件 + 16 个额外后端匹配基线 = 184 条件、5520 episodes**。新增 25% 指删除 25%、保留 75%，不是保留 25%。主表每个模型有 Vanilla 一行、五种方法各四档，共 42 行。所有基线优先执行；不复用历史暂停队列的结果。
+共 **172 个主表条件 + 16 个额外后端匹配基线 = 188 条件、5640 episodes**。新增 25% 指删除 25%、保留 75%，不是保留 25%。固定预算方法保持四档；PACT-VLA 在 OFT 上增加一条自适应预算结果，主表共 43 行。所有基线优先执行；不复用历史暂停队列的结果。
 
 开启 `--collect-flops` 后，条件完成时自动更新 `table1.csv`、`table1_with_backend_baselines.csv` 和逐套件 `summary.csv`。主表提供四套件成功率、`Acc.(%)`、`FLOPs(T)`、`Latency(ms)` 和加速比；尚未完成四套件的行不填整体均值。
 

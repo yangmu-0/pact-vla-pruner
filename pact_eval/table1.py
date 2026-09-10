@@ -35,8 +35,11 @@ def table_rows(jobs, supplemental=False):
         current=[group[s].get('success_rate') for s in SUITES] if complete(group) else []
         base=[canonical[s].get('success_rate') for s in SUITES] if complete(canonical) else []
         match=[matched[s].get('success_rate') for s in SUITES] if complete(matched) else []
-        row={'model':model,'method':strategy,'backend':kind,'pruning_or_reuse_pct':pruning*100,
-             'retention_pct':100*(1-pruning),'completed_suites':sum(j['state']=='COMPLETED' for j in group.values()),
+        adaptive=next(iter(group.values())).get('ratio_semantics')=='adaptive_retention'
+        row={'model':model,'method':strategy,'backend':kind,
+             'pruning_or_reuse_pct':None if adaptive else pruning*100,
+             'retention_pct':None if adaptive else 100*(1-pruning),
+             'completed_suites':sum(j['state']=='COMPLETED' for j in group.values()),
              'state':'COMPLETE' if complete(group) else 'PARTIAL',
              **{s:100*group[s]['success_rate'] if s in group and group[s]['state']=='COMPLETED' and group[s].get('success_rate') is not None else None for s in SUITES},
              'Success_avg(%)':100*statistics.mean(current) if len(current)==4 and all(v is not None for v in current) else None,

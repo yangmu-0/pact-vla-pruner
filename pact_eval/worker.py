@@ -46,6 +46,23 @@ def episode_counts(out):
     return len(outcomes), outcomes.count('True'), errors
 
 
+def expected_native_budgets(job, visual_tokens):
+    """Return valid observed budgets for fixed or adaptive native pruning."""
+    if job.get('ratio_semantics') == 'adaptive_retention':
+        rates = tuple(float(value.strip()) for value in
+                      job['settings']['pact_budget_rates'].split(','))
+        expected = {round(visual_tokens * rate) for rate in rates}
+        if job['model'] == 'oft':
+            expected.update(2 * round(visual_tokens / 2 * rate) for rate in rates)
+        return expected
+    expected = {round(visual_tokens * (1 - job['ratio']))}
+    if job['model'] == 'oft':
+        expected.add(2 * round(visual_tokens / 2 * (1 - job['ratio'])))
+    if job['strategy'] == 'vla-pruner':
+        expected.add(visual_tokens)  # preserved temporal warmup/fallback
+    return expected
+
+
 def main():
     job = json.loads(Path(sys.argv[1]).read_text())
     root, out = Path(job['root']), Path(job['output'])
@@ -181,7 +198,18 @@ def main():
                     evaluation.get_pruning_call_metrics = lambda cfg, m: dict(
                         visual_tokens_before=512, visual_tokens_kept=round(512*(1-job['ratio'])),
                         flop_ratio=float('nan'), budget_key=str(round(512*(1-job['ratio']))))
-            layers = model.language_model.model.layers
+            llama_model = model.language_model.model
+            layers = llama_model.layers
+            if job['strategy']=='pact-vla':
+                original_pruning_indices = llama_model._fastv_pruning_indices
+                def traced_pruning_indices(*args, **kwargs):
+                    keep_indices, score_info = original_pruning_indices(*args, **kwargs)
+                    # Retain GPU tensors only by reference here.  Conversion for JSON
+                    # happens after the timed policy/model regions, so tracing does not
+                    # perturb the latency measurement or pruning decision.
+                    model._pact_raw_process_trace = (keep_indices.detach(), score_info)
+                    return keep_indices, score_info
+                llama_model._fastv_pruning_indices = traced_pruning_indices
             for index, layer in enumerate(layers):
                 def before_layer(module, args, kwargs, index=index):
                     hidden = args[0] if args else kwargs['hidden_states']
@@ -218,6 +246,8 @@ def main():
             layer_lengths.clear()
             layer_visits.clear()
             last_model_times.clear()
+            if loaded and job['strategy']=='pact-vla':
+                loaded[-1]._pact_raw_process_trace = None
             tracking['episode_call']+=1
             profiled=collect_flops and should_profile(tracking['episode_call'],job.get('flops_sample_interval',50))
             counter=profile_counter() if profiled else None
@@ -249,17 +279,32 @@ def main():
                 if job['strategy']=='vanilla' and kept!=n:
                     raise ValueError(f'Vanilla unexpectedly changed token count: {kept} != {n}')
                 if job['backend_kind']=='native' and job['strategy']!='vanilla':
-                    expected = {round(n*(1-job['ratio']))}
-                    if job['model']=='oft':
-                        expected.add(2*round(n/2*(1-job['ratio'])))
-                    if job['strategy']=='vla-pruner':
-                        expected.add(n)  # preserved temporal warmup/fallback
+                    expected = expected_native_budgets(job, n)
                     if kept not in expected:
                         raise ValueError(f'Native budget mismatch: expected {sorted(expected)}, actual {kept}')
                 if job['backend_kind']=='vla-cache':
                     expected = n if cold or job['strategy']=='vanilla' else n-int(round(n*job['ratio']))
                     if kept != expected:
                         raise ValueError(f'Cache budget mismatch: expected {expected}, actual {kept}')
+                pact_process = None
+                if job['strategy']=='pact-vla':
+                    raw_trace = getattr(loaded[-1], '_pact_raw_process_trace', None)
+                    if raw_trace is None:
+                        pact_process = dict(
+                            selected_visual_indices=list(range(n)),
+                            pact=None,
+                            controller_called=False,
+                        )
+                    else:
+                        keep_indices, score_info = raw_trace
+                        image_start = int(score_info['image_token_start_index'])
+                        image_end = image_start + int(score_info['image_token_length'])
+                        visual_indices = keep_indices[(keep_indices >= image_start) & (keep_indices < image_end)]
+                        pact_process = dict(
+                            selected_visual_indices=(visual_indices - image_start).detach().cpu().tolist(),
+                            pact=score_info.get('pact'),
+                            controller_called=True,
+                        )
                 costs=prefill_cost(layer_visits) if collect_flops else {}
                 if counter is not None:
                     total=counter.get_total_flops()
@@ -279,7 +324,7 @@ def main():
                 writer.writerow(entry)
                 audits.write(json.dumps(dict(call=len(calls), layer_lengths=layer_lengths,
                     visual_kept=kept, cache_selection=budget_state,flop_estimates=costs,
-                    **tracking), default=str)+'\n')
+                    pact_process=pact_process, action=action.tolist(), **tracking), default=str)+'\n')
                 if len(calls)%10 == 0 or len(calls)==1:
                     report()
                 if job['mode']=='verify' and len(calls)>=job['verify_calls']:

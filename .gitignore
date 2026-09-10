@@ -9,6 +9,10 @@
 /runs/
 /provenance/
 /.locks/
+/latex/
+/openvla-oft/
+*.back.*
+.DS_Store
 __pycache__/
 *.py[cod]
 .pytest_cache/
