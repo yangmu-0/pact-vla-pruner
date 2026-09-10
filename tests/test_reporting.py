@@ -64,5 +64,11 @@ class ReportingTests(unittest.TestCase):
                  settings={'pact_budget_rates':'0.125,0.25,0.5,0.75,1'})
         self.assertEqual(expected_native_budgets(job,512),{64,128,256,384,512})
 
+    def test_adaptive_pact_uses_method_ceiling_budget(self):
+        job=dict(model='oft',strategy='pact-vla',ratio=0.0,
+                 ratio_semantics='adaptive_retention',
+                 settings={'pact_budget_rates':'0.333,1'})
+        self.assertEqual(expected_native_budgets(job,512),{171,512})
+
 if __name__=='__main__':
     unittest.main()

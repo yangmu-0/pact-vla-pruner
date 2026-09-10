@@ -58,6 +58,10 @@ class PlanningTests(unittest.TestCase):
         self.assertTrue(job['settings']['use_prefil_attention'])
         self.assertEqual(job['settings']['fastv_r'],.5)
         self.assertEqual(job['settings']['pact_budget_rates'],'0.125,0.25,0.5,0.75,1')
+        self.assertEqual(job['settings']['pact_gamma'],.8)
+        self.assertEqual(job['settings']['pact_theta0'],.4)
+        self.assertEqual(job['settings']['pact_theta_min'],.15)
+        self.assertEqual(job['settings']['pact_theta_max'],.7)
 
     def test_pact_vla_model_compatibility(self):
         with self.assertRaisesRegex(ValueError,'only for --model oft'):

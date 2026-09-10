@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -51,10 +52,7 @@ def expected_native_budgets(job, visual_tokens):
     if job.get('ratio_semantics') == 'adaptive_retention':
         rates = tuple(float(value.strip()) for value in
                       job['settings']['pact_budget_rates'].split(','))
-        expected = {round(visual_tokens * rate) for rate in rates}
-        if job['model'] == 'oft':
-            expected.update(2 * round(visual_tokens / 2 * rate) for rate in rates)
-        return expected
+        return {math.ceil(visual_tokens * rate) for rate in rates}
     expected = {round(visual_tokens * (1 - job['ratio']))}
     if job['model'] == 'oft':
         expected.add(2 * round(visual_tokens / 2 * (1 - job['ratio'])))

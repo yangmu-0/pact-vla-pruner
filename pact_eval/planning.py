@@ -132,10 +132,9 @@ def make_jobs(root, args):
                             # PACT is enabled by the pruning path's positive fastv_r gate, but
                             # dynamically chooses the actual retention rate at runtime.
                             settings.update(fastv_r=0.5, use_prefil_attention=True,
-                                            pact_budget_rates=pact_rates, pact_beta=1.0,
-                                            pact_theta0=.10, pact_alpha_conflict=.10,
-                                            pact_theta_min=.10, pact_theta_max=.70,
-                                            pact_shrink_hysteresis=2)
+                                            pact_budget_rates=pact_rates, pact_gamma=.8,
+                                            pact_theta0=.4, pact_alpha_d=.10,
+                                            pact_theta_min=.15, pact_theta_max=.7)
                 if family == 'oft':
                     settings.update(num_images_in_input=2, use_proprio=True, num_open_loop_steps=8,
                                     use_l1_regression=True, use_diffusion=False, use_film=False,
