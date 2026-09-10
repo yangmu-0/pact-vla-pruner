@@ -1,0 +1,48 @@
+{
+  "description": "PACT-VLA controller: overlay files that replace their counterparts in the upstream VLA-Pruner checkout.",
+  "upstream": {
+    "repository": "https://github.com/MINT-SJTU/VLA-Pruner.git",
+    "base_commit": "a5d4cbd",
+    "base_commit_subject": "feat: add PACT-VLA pruning to OpenVLA-OFT",
+    "head_commit": "be61a2a",
+    "head_commit_subject": "Set PACT theta0 to 0.4 and unify its default across the stack",
+    "diffstat": "6 files changed, 422 insertions(+), 267 deletions(-)"
+  },
+  "excluded": {
+    "model_weights": "vendor/vla-pruner/src/openvla/checkpoints and .../openvla-oft/checkpoints (~117 GB, untracked upstream)",
+    "conda_environments": "never inside the repository"
+  },
+  "apply": "cp -r files/. <clean VLA-Pruner checkout at a5d4cbd>/",
+  "files": [
+    {
+      "path": "src/openvla-oft/experiments/robot/openvla_utils.py",
+      "sha256": "62b74d888a2426508bd8bb3dc9c1196764f428e5e4d046a3bbfeb81a07e52db8",
+      "bytes": 39562
+    },
+    {
+      "path": "src/openvla-oft/experiments/robot/libero/run_libero_eval.py",
+      "sha256": "6e099498dbd374b6279fa7dbccce6bb93bfbc602fa3ebcf36fb7d8bc87241b11",
+      "bytes": 31288
+    },
+    {
+      "path": "src/openvla-oft/prismatic/extern/hf/modeling_prismatic.py",
+      "sha256": "2f844ff795f5b1b5f1521193c0fba3c7ca2c605c30cf058cce7e5ccdbd468bd8",
+      "bytes": 65482
+    },
+    {
+      "path": "src/openvla-oft/transformers/src/transformers/models/llama/modeling_llama.py",
+      "sha256": "4489ac10d718c6d2db563fefe2f375c956b47b098f66bc86c078b0596bc245f7",
+      "bytes": 112238
+    },
+    {
+      "path": "src/openvla-oft/transformers/src/transformers/models/llama/pact_vla.py",
+      "sha256": "ed77b20ad2b3e4617a6820b5f4484900cc8efc130c2cc8c7fcf4af11eb7ac6ac",
+      "bytes": 12277
+    },
+    {
+      "path": "src/openvla-oft/transformers/tests/models/llama/test_pact_vla.py",
+      "sha256": "906f1ff98e904692d4fa2ae5b123740cce53147664ae952fab00658da7d9013f",
+      "bytes": 3184
+    }
+  ]
+}
