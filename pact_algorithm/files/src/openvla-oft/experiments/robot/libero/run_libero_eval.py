@@ -114,6 +114,7 @@ class GenerateConfig:
     vla_pruner_av_hist_w: int = 3
     vla_pruner_av_decay: float = 0.8
     pact_budget_rates: str = "0.25,0.5,1.0"
+    pact_variant: str = "full"
     pact_gamma: float = 0.8
     pact_theta0: float = 0.4
     pact_alpha_d: float = 0.10
@@ -161,6 +162,8 @@ class GenerateConfig:
     run_id_note: Optional[str] = None                # Extra note to add to end of run ID for logging
     local_log_dir: str = "./experiments/logs"        # Local directory for eval logs
     save_rollout_videos: bool = False               # Save per-episode MP4s; disabling avoids ffmpeg fork/native crashes
+    save_rollout_full_rate: bool = False            # Save every simulator control step instead of policy-query frames
+    rollout_video_fps: float = 30.0                 # Encoding rate; LIBERO control runs at 20 Hz
 
     use_wandb: bool = False                          # Whether to also log results in Weights & Biases
     wandb_entity: str = "your-wandb-entity"          # Name of WandB entity
@@ -185,6 +188,7 @@ def validate_config(cfg: GenerateConfig) -> None:
         budget_rates = tuple(float(rate.strip()) for rate in cfg.pact_budget_rates.split(","))
         assert budget_rates == tuple(sorted(set(budget_rates))), "PACT budget rates must be sorted and unique."
         assert budget_rates and 0.0 < budget_rates[0] and budget_rates[-1] == 1.0
+        assert cfg.pact_variant in ("full", "no-conflict", "perception-only", "last-action-prior")
         assert 0.0 < cfg.pact_gamma <= 1.0
         assert 0.0 <= cfg.pact_theta_min <= cfg.pact_theta_max <= 1.0
     assert cfg.fastv_attention_source in {
@@ -195,6 +199,7 @@ def validate_config(cfg: GenerateConfig) -> None:
     # Validate task suite
     assert cfg.task_suite_name in [suite.value for suite in TaskSuite], f"Invalid task suite: {cfg.task_suite_name}"
     assert cfg.max_tasks >= 0, "max_tasks must be non-negative."
+    assert cfg.rollout_video_fps > 0, "rollout_video_fps must be positive."
 
 
 def initialize_model(cfg: GenerateConfig):
@@ -315,12 +320,15 @@ def log_eval_config(cfg: GenerateConfig, log_file=None) -> None:
     log_message(f"  vla_pruner_av_decay: {cfg.vla_pruner_av_decay}", log_file)
     if cfg.use_pact_vla:
         log_message(f"  pact_budget_rates: {cfg.pact_budget_rates}", log_file)
+        log_message(f"  pact_variant: {cfg.pact_variant}", log_file)
         log_message(f"  pact_gamma: {cfg.pact_gamma}", log_file)
         log_message(f"  pact_theta0: {cfg.pact_theta0}", log_file)
         log_message(f"  pact_alpha_d: {cfg.pact_alpha_d}", log_file)
         log_message(f"  pact_theta_range: [{cfg.pact_theta_min}, {cfg.pact_theta_max}]", log_file)
     log_message(f"  merge_local_lora_adapter: {cfg.merge_local_lora_adapter}", log_file)
     log_message(f"  save_rollout_videos: {cfg.save_rollout_videos}", log_file)
+    log_message(f"  save_rollout_full_rate: {cfg.save_rollout_full_rate}", log_file)
+    log_message(f"  rollout_video_fps: {cfg.rollout_video_fps}", log_file)
 
 
 def load_initial_states(cfg: GenerateConfig, task_suite, task_id: int, log_file=None):
@@ -475,8 +483,12 @@ def run_episode(
             # Prepare observation
             observation, img = prepare_observation(obs, resize_size)
             img_wrist = observation["wrist_image"]
-            replay_images.append(img)
-            replay_images_wrist.append(img_wrist)
+            if cfg.save_rollout_full_rate:
+                replay_images.append(get_libero_image(obs))
+                replay_images_wrist.append(get_libero_wrist_image(obs))
+            else:
+                replay_images.append(img)
+                replay_images_wrist.append(img_wrist)
 
             # VLA-Cache/VLA-Pruner compares the current query frame to the previous query frame.
             observation["prev_images"] = [
@@ -546,6 +558,8 @@ def run_episode(
         "episode_budget_counts": dict(episode_budget_counts),
     }
 
+    if cfg.save_rollout_full_rate:
+        return success, replay_images, replay_images_wrist, eposode_metrics
     return success, replay_images_heatmap, replay_images_wrist_heatmap, eposode_metrics
 
 
@@ -650,6 +664,7 @@ def run_task(
                 task_description=task_description,
                 log_file=log_file,
                 view="primary",
+                fps=cfg.rollout_video_fps,
             )
             save_rollout_video(
                 replay_images_wrist,
@@ -658,6 +673,7 @@ def run_task(
                 task_description=task_description,
                 log_file=log_file,
                 view="wrist",
+                fps=cfg.rollout_video_fps,
             )
 
         # Log results

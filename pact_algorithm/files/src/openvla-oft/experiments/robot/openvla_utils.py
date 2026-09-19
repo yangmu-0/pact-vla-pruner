@@ -371,7 +371,8 @@ def _configure_attention_pruning(vla: torch.nn.Module, cfg: Any) -> None:
     use_prefil_attention = bool(
         getattr(cfg, "use_prefil_attention", fastv_attention_source != "last")
     )
-    use_vla_pruner_temporal = use_pact_vla or (
+    pact_variant = str(getattr(cfg, "pact_variant", "full"))
+    use_vla_pruner_temporal = (use_pact_vla and pact_variant != "perception-only") or (
         use_vla_pruner
         and vla_pruner_mode in {
             "action",
@@ -406,6 +407,7 @@ def _configure_attention_pruning(vla: torch.nn.Module, cfg: Any) -> None:
         obj.pact_budget_rates = tuple(
             float(rate.strip()) for rate in str(getattr(cfg, "pact_budget_rates", "0.25,0.5,1.0")).split(",")
         )
+        obj.pact_variant = str(getattr(cfg, "pact_variant", "full"))
         obj.pact_gamma = float(getattr(cfg, "pact_gamma", obj.av_decay))
         obj.pact_theta0 = float(getattr(cfg, "pact_theta0", 0.4))
         obj.pact_alpha_d = float(getattr(cfg, "pact_alpha_d", 0.10))

@@ -88,3 +88,33 @@ def test_invalid_attribution_returns_full_token_fallback():
     assert selected.tolist() == [0, 1, 2, 3]
     assert stats["fallback"] is True
     assert "finite" in stats["fallback_reason"]
+
+
+def test_no_conflict_keeps_base_threshold_and_skips_jsd():
+    perception = _scores([4.0, 4.0, 0.0, 0.0])
+    action = _scores([0.0, 0.0, 4.0, 4.0])
+    _, stats = _controller(variant="no-conflict", theta0=.4, alpha_d=.5,
+                           theta_min=0.0).select(perception, (action,))
+    assert stats["d_t"] is None
+    assert stats["theta_t"] == pytest.approx(.4)
+
+
+def test_perception_only_ignores_action_history():
+    perception = _scores([4.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    conflict = _scores([0.0, 0.0, 4.0, 4.0, 0.0, 0.0, 0.0, 0.0])
+    selected, stats = _controller(variant="perception-only").select(perception, (conflict,))
+    assert selected.numel() == 2
+    assert stats["history_size"] == 0
+    assert stats["available_history_size"] == 1
+    assert stats["d_t"] == pytest.approx(0.0)
+
+
+def test_last_action_prior_ignores_older_actions():
+    perception = _scores([4.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    old_conflict = _scores([0.0, 0.0, 4.0, 4.0, 0.0, 0.0, 0.0, 0.0])
+    recent_match = perception.clone()
+    selected, stats = _controller(variant="last-action-prior").select(
+        perception, (old_conflict, recent_match))
+    assert selected.numel() == 2
+    assert stats["history_size"] == 1
+    assert stats["available_history_size"] == 2

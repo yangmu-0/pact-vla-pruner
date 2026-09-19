@@ -4,45 +4,74 @@
     "repository": "https://github.com/MINT-SJTU/VLA-Pruner.git",
     "base_commit": "a5d4cbd",
     "base_commit_subject": "feat: add PACT-VLA pruning to OpenVLA-OFT",
-    "head_commit": "be61a2a",
-    "head_commit_subject": "Set PACT theta0 to 0.4 and unify its default across the stack",
-    "diffstat": "6 files changed, 422 insertions(+), 267 deletions(-)"
+    "head_commit": "23d57fa",
+    "head_commit_subject": "Add PACT ablation variants and latter-half attention aggregation",
+    "local_commits": [
+      "d9f9066",
+      "be61a2a",
+      "3dc8de7",
+      "65dcb2f",
+      "23d57fa"
+    ],
+    "diffstat": "8 files changed, 701 insertions(+), 313 deletions(-)"
   },
+  "pact_files": [
+    "src/openvla-oft/transformers/src/transformers/models/llama/pact_vla.py",
+    "src/openvla-oft/transformers/tests/models/llama/test_pact_vla.py",
+    "src/openvla-oft/transformers/src/transformers/models/llama/modeling_llama.py",
+    "src/openvla-oft/prismatic/extern/hf/modeling_prismatic.py",
+    "src/openvla-oft/experiments/robot/openvla_utils.py",
+    "src/openvla-oft/experiments/robot/libero/run_libero_eval.py"
+  ],
+  "non_pact_files": [
+    "src/openvla-oft/prismatic/vla/constants.py",
+    "src/openvla-oft/experiments/robot/libero/libero_utils.py"
+  ],
   "excluded": {
-    "model_weights": "vendor/vla-pruner/src/openvla/checkpoints and .../openvla-oft/checkpoints (~117 GB, untracked upstream)",
+    "model_weights": "src/openvla/checkpoints and src/openvla-oft/checkpoints (~117 GB, untracked upstream)",
     "conda_environments": "never inside the repository"
   },
   "apply": "cp -r files/. <clean VLA-Pruner checkout at a5d4cbd>/",
   "files": [
     {
       "path": "src/openvla-oft/experiments/robot/openvla_utils.py",
-      "sha256": "62b74d888a2426508bd8bb3dc9c1196764f428e5e4d046a3bbfeb81a07e52db8",
-      "bytes": 39562
+      "sha256": "0336eb46940e3cc2e60307f2e38d6b68afeeb8a11121e841c5a150f6d3865716",
+      "bytes": 39732
+    },
+    {
+      "path": "src/openvla-oft/experiments/robot/libero/libero_utils.py",
+      "sha256": "e45ccebe5da2f733be7d71ed2ad8512a5493b2e16ec9da0616c2c8a154da07de",
+      "bytes": 3186
     },
     {
       "path": "src/openvla-oft/experiments/robot/libero/run_libero_eval.py",
-      "sha256": "6e099498dbd374b6279fa7dbccce6bb93bfbc602fa3ebcf36fb7d8bc87241b11",
-      "bytes": 31288
+      "sha256": "25033b15bb4bdb29c4f75a7f2bb762b2707506816ffdd8921213a4edacf4fb79",
+      "bytes": 32338
+    },
+    {
+      "path": "src/openvla-oft/prismatic/vla/constants.py",
+      "sha256": "de4cc15d59378139b0d616f48e95bc04173516f3019fa578e8c4bfdd66c96786",
+      "bytes": 3789
     },
     {
       "path": "src/openvla-oft/prismatic/extern/hf/modeling_prismatic.py",
-      "sha256": "2f844ff795f5b1b5f1521193c0fba3c7ca2c605c30cf058cce7e5ccdbd468bd8",
-      "bytes": 65482
+      "sha256": "82a6d37837336701a2a7d50ffdd24ee4624adc57540f11a34825ccb9749fc248",
+      "bytes": 66109
     },
     {
       "path": "src/openvla-oft/transformers/src/transformers/models/llama/modeling_llama.py",
-      "sha256": "4489ac10d718c6d2db563fefe2f375c956b47b098f66bc86c078b0596bc245f7",
-      "bytes": 112238
+      "sha256": "6dde571c4aaf3f1b2c56067229f89c2ca7e22116c5a6b609019eade06e4d21c5",
+      "bytes": 117550
     },
     {
       "path": "src/openvla-oft/transformers/src/transformers/models/llama/pact_vla.py",
-      "sha256": "ed77b20ad2b3e4617a6820b5f4484900cc8efc130c2cc8c7fcf4af11eb7ac6ac",
-      "bytes": 12277
+      "sha256": "0fe57ee3c874e1bda76445b42c8c312b4739cc94001b276af20bc4260e79ffb6",
+      "bytes": 14480
     },
     {
       "path": "src/openvla-oft/transformers/tests/models/llama/test_pact_vla.py",
-      "sha256": "906f1ff98e904692d4fa2ae5b123740cce53147664ae952fab00658da7d9013f",
-      "bytes": 3184
+      "sha256": "351c45b271edd7f9445e3fbb4bb803c68bb246df3c26c74bbd2d36adbc766e86",
+      "bytes": 4472
     }
   ]
 }

@@ -75,6 +75,54 @@ def _get_unpad_data(attention_mask):
     )
 
 
+def _reduce_pact_action_attention(layer_attention, kept_indices, fastv_config):
+    """Reduce one decoder attention matrix to an original-resolution action-to-vision vector."""
+    if not torch.is_tensor(layer_attention) or layer_attention.ndim != 4:
+        return None
+
+    visual_start = int(fastv_config.get("image_token_start_index", 0))
+    visual_length = int(fastv_config.get("image_token_length", 0))
+    visual_end = visual_start + visual_length
+    action_start = int(fastv_config.get("action_token_start", 0))
+    action_end = int(fastv_config.get("action_token_end", 0))
+    action_horizon = int(fastv_config.get("action_horizon", 0))
+    if action_horizon > 0:
+        action_dim = int(fastv_config.get("action_dim", 1))
+        action_end = min(action_end, action_start + action_horizon * action_dim)
+    if visual_length <= 0 or action_end <= action_start:
+        return None
+
+    # Match Prismatic's existing aggregation exactly: average heads first, use
+    # batch element zero, then average all action-token query rows.
+    attention_avg = layer_attention.to(torch.float32).mean(dim=1)[0]
+    if kept_indices is None:
+        if action_end > attention_avg.shape[0] or visual_end > attention_avg.shape[1]:
+            return None
+        return attention_avg[action_start:action_end, visual_start:visual_end].mean(dim=0)
+
+    kept_indices = kept_indices.to(device=attention_avg.device)
+    action_positions = torch.nonzero(
+        (kept_indices >= action_start) & (kept_indices < action_end), as_tuple=False
+    ).flatten()
+    visual_positions = torch.nonzero(
+        (kept_indices >= visual_start) & (kept_indices < visual_end), as_tuple=False
+    ).flatten()
+    if action_positions.numel() == 0:
+        return None
+
+    action_scores = torch.zeros(
+        visual_length, dtype=attention_avg.dtype, device=attention_avg.device
+    )
+    if visual_positions.numel() == 0:
+        return action_scores
+
+    reduced = attention_avg.index_select(0, action_positions)
+    reduced = reduced.index_select(1, visual_positions).mean(dim=0)
+    visual_offsets = kept_indices.index_select(0, visual_positions) - visual_start
+    action_scores.index_copy_(0, visual_offsets, reduced)
+    return action_scores
+
+
 class LlamaRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
@@ -373,9 +421,7 @@ class LlamaAttention(nn.Module):
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
         if attention_mask is not None:  # no matter the length, we just slice it
-            causal_mask = attention_mask
-            if cache_position is not None:
-                causal_mask = attention_mask[:, :, cache_position, : key_states.shape[-2]]
+            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
 
         # upcast attention to fp32
@@ -659,8 +705,8 @@ class LlamaSdpaAttention(LlamaAttention):
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
         causal_mask = attention_mask
-        if attention_mask is not None and cache_position is not None:
-            causal_mask = causal_mask[:, :, cache_position, : key_states.shape[-2]]
+        if attention_mask is not None:
+            causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
 
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
@@ -671,13 +717,21 @@ class LlamaSdpaAttention(LlamaAttention):
 
         # In case we are not compiling, we may set `causal_mask` to None, which is required to dispatch to SDPA's Flash Attention 2 backend, rather
         # relying on the `is_causal` argument.
+        # OpenVLA-OFT 4.40.1 uses bidirectional attention for the multimodal
+        # action-token sequence.  Preserve padding columns by repeating the
+        # final causal-mask row across all query rows.
+        if causal_mask is not None:
+            sequence_length = causal_mask.shape[-1]
+            last_row = causal_mask[:, :, -1, :].clone()
+            causal_mask = last_row.unsqueeze(2).expand(-1, -1, sequence_length, -1)
+
         attn_output = torch.nn.functional.scaled_dot_product_attention(
             query_states,
             key_states,
             value_states,
             attn_mask=causal_mask,
             dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=causal_mask is None and q_len > 1,
+            is_causal=False,
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
@@ -951,13 +1005,15 @@ class LlamaModel(LlamaPreTrainedModel):
         self.embed_tokens = value
 
     def reset_pact_state(self):
-        if self._pact_budget_controller is not None:
-            self._pact_budget_controller.reset()
+        controller = getattr(self, "_pact_budget_controller", None)
+        if controller is not None:
+            controller.reset()
 
     def _pact_controller_for_config(self, fastv_config: dict):
         budget_rates = tuple(float(rate) for rate in fastv_config.get("pact_budget_rates", (0.25, 0.5, 1.0)))
         settings = {
             "budget_rates": budget_rates,
+            "variant": str(fastv_config.get("pact_variant", "full")),
             "gamma": float(fastv_config.get("pact_gamma", 0.8)),
             "theta0": float(fastv_config.get("pact_theta0", 0.4)),
             "alpha_d": float(fastv_config.get("pact_alpha_d", 0.10)),
@@ -965,7 +1021,8 @@ class LlamaModel(LlamaPreTrainedModel):
             "theta_max": float(fastv_config.get("pact_theta_max", 0.7)),
         }
         candidate = PACTController(**settings)
-        if self._pact_budget_controller is None or self._pact_budget_controller.signature != candidate.signature:
+        current = getattr(self, "_pact_budget_controller", None)
+        if current is None or current.signature != candidate.signature:
             self._pact_budget_controller = candidate
         return self._pact_budget_controller
 
@@ -1347,6 +1404,7 @@ class LlamaModel(LlamaPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         fastv_layer = max(0, min(int(fastv_config["fastv_k"]), len(self.layers) - 1))
+        use_pact_vla = bool(fastv_config.get("use_pact_vla", False))
         image_len = int(fastv_config.get("image_token_length", 0))
         prune_ratio = float(fastv_config.get("fastv_r", 0.5))
         pruning_flops_debug = os.environ.get("OPENVLA_PRUNING_FLOPS", "0").lower() in {"1", "true", "yes"}
@@ -1371,15 +1429,19 @@ class LlamaModel(LlamaPreTrainedModel):
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
-                past_key_values=past_key_values,
+                past_key_values=None,
                 inputs_embeds=inputs_embeds,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
+                use_cache=None,
+                output_attentions=False,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
                 cache_position=cache_position,
             )
         return_attentions = bool(fastv_config.get("return_attentions", False))
+        # PACT only needs the pruning-layer matrix and a latter-half
+        # action-to-vision summary. Materializing and retaining every full
+        # attention matrix is prohibitively expensive for Piper's long action
+        # sequence, so PACT requests matrices one layer at a time below.
         output_attentions = True
 
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -1418,13 +1480,16 @@ class LlamaModel(LlamaPreTrainedModel):
         # Pruning needs attention tensors for scoring, but mask construction must
         # stay identical to the vanilla OpenVLA-OFT forward path.
         causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_seen_tokens, False
+            attention_mask, inputs_embeds, cache_position, past_seen_tokens
         )
 
         hidden_states = inputs_embeds
         all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if return_attentions else None
+        all_self_attns = () if return_attentions and not use_pact_vla else None
         next_decoder_cache = None
+        pact_attention_sum = None
+        pact_attention_layers = 0
+        pact_aggregation_start = len(self.layers) // 2
         pruning_info = {
             "original_seq_length": inputs_embeds.shape[1],
             "pruned_indices": None,
@@ -1443,6 +1508,12 @@ class LlamaModel(LlamaPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
+            layer_output_attentions = (
+                True
+                if not use_pact_vla
+                else layer_idx == fastv_layer or layer_idx >= pact_aggregation_start
+            )
+
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
                     decoder_layer.__call__,
@@ -1450,7 +1521,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     causal_mask,
                     position_ids,
                     past_key_values,
-                    output_attentions,
+                    layer_output_attentions,
                     use_cache,
                     cache_position,
                 )
@@ -1460,18 +1531,18 @@ class LlamaModel(LlamaPreTrainedModel):
                     attention_mask=causal_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_values,
-                    output_attentions=output_attentions,
+                    output_attentions=layer_output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
                 )
 
             hidden_states = layer_outputs[0]
 
-            if return_attentions:
+            if return_attentions and not use_pact_vla:
                 all_self_attns += (layer_outputs[1],)
 
             if use_cache:
-                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+                next_decoder_cache = layer_outputs[2 if layer_output_attentions else 1]
 
             if (
                 layer_idx == fastv_layer
@@ -1523,7 +1594,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     hidden_states = hidden_states.index_select(1, keep_indices)
                     position_ids = keep_indices.unsqueeze(0)
                     cache_position = torch.arange(keep_indices.shape[0], device=hidden_states.device)
-                    causal_mask = self._update_causal_mask(None, hidden_states, cache_position, 0, False)
+                    causal_mask = self._update_causal_mask(None, hidden_states, cache_position, 0)
                     pruning_info.update(
                         {
                             "pruned_indices": pruned_indices,
@@ -1535,6 +1606,11 @@ class LlamaModel(LlamaPreTrainedModel):
                             **score_info,
                         }
                     )
+                    # Dense summaries collected before a late pruning layer do
+                    # not have the final matrix shape and were excluded by the
+                    # former stack-and-filter implementation as well.
+                    pact_attention_sum = None
+                    pact_attention_layers = 0
                     report_once_now = pruning_report_once and not getattr(
                         self, "_openvla_pruning_report_once_done", False
                     )
@@ -1570,6 +1646,30 @@ class LlamaModel(LlamaPreTrainedModel):
                         )
                         if report_once_now:
                             self._openvla_pruning_report_once_done = True
+                else:
+                    # Keep PACT controller diagnostics even when the selected
+                    # budget retains the complete visual sequence.
+                    pruning_info.update(score_info)
+
+            if use_pact_vla and layer_idx >= pact_aggregation_start:
+                pruning_layer = pruning_info.get("pruning_layer")
+                # The pruning layer's matrix describes the pre-prune sequence;
+                # only subsequent matrices share the final token coordinates.
+                if pruning_layer is None or layer_idx > int(pruning_layer):
+                    layer_attention = layer_outputs[1] if layer_output_attentions else None
+                    reduced_attention = _reduce_pact_action_attention(
+                        layer_attention,
+                        pruning_info.get("kept_indices"),
+                        fastv_config,
+                    )
+                    if reduced_attention is not None:
+                        reduced_attention = reduced_attention.detach()
+                        pact_attention_sum = (
+                            reduced_attention
+                            if pact_attention_sum is None
+                            else pact_attention_sum + reduced_attention
+                        )
+                        pact_attention_layers += 1
 
         hidden_states = self.norm(hidden_states)
 
@@ -1577,6 +1677,12 @@ class LlamaModel(LlamaPreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         next_cache = next_decoder_cache if use_cache else None
+
+        if use_pact_vla and pact_attention_sum is not None and pact_attention_layers > 0:
+            pruning_info["pact_action_attention"] = (
+                pact_attention_sum.div(float(pact_attention_layers)).detach().float().cpu()
+            )
+            pruning_info["pact_action_attention_layers"] = pact_attention_layers
 
         self.pruning_info = pruning_info
         if not return_dict:
@@ -1768,7 +1874,7 @@ class LlamaModel(LlamaPreTrainedModel):
         input_tensor: torch.Tensor,
         cache_position: torch.Tensor,
         past_seen_tokens: int,
-        output_attentions: bool,
+        output_attentions: bool = False,
     ):
         # TODO: As of torch==2.2.0, the `attention_mask` passed to the model in `generate` is 2D and of dynamic length even when the static
         # KV cache is used. This is an issue for torch.compile which then recaptures cudagraphs at each decode steps due to the dynamic shapes.

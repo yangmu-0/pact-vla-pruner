@@ -332,12 +332,11 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
                 "if you urgently need support for latest TIMM versions."
             )
 
-        if (transformers.__version__ != "4.47.0") or (tokenizers.__version__ != "0.21.1"):
+        if (transformers.__version__ != "4.40.1") or (tokenizers.__version__ != "0.19.1"):
             logger.warning(
-                f"Expected vendored `transformers==4.47.0` and `tokenizers==0.21.1` but got "
+                f"Expected OpenVLA-OFT baseline `transformers==4.40.1` and `tokenizers==0.19.1` but got "
                 f"`transformers=={transformers.__version__}` and `tokenizers=={tokenizers.__version__}`; "
-                f"there might be inference-time regressions due to dependency changes. If in doubt, install "
-                f"`src/openvla-oft/transformers` first, then install OpenVLA-OFT."
+                f"there might be inference-time regressions due to dependency changes."
             )
 
         # Instantiate PrismaticVisionBackbone (w/ Potential Fused Backbone)
@@ -756,6 +755,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         self.av_hist = deque(maxlen=max(1, int(getattr(config, "av_hist_w", 3))))
         self._pending_action_attention = None
         self.pact_budget_rates = tuple(getattr(config, "pact_budget_rates", (0.25, 0.5, 1.0)))
+        self.pact_variant = str(getattr(config, "pact_variant", "full"))
         self.pact_gamma = float(getattr(config, "pact_gamma", self.av_decay))
         self.pact_theta0 = float(getattr(config, "pact_theta0", 0.4))
         self.pact_alpha_d = float(getattr(config, "pact_alpha_d", 0.10))
@@ -908,6 +908,16 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         if token_metadata is None or not bool(getattr(self, "use_temporal", False)):
             return None
 
+        pruning_info = getattr(language_model_output, "pruning_info", None)
+        streamed_attention = (
+            pruning_info.get("pact_action_attention") if isinstance(pruning_info, dict) else None
+        )
+        if (
+            torch.is_tensor(streamed_attention)
+            and streamed_attention.numel() == int(token_metadata["num_visual_tokens"])
+        ):
+            return streamed_attention.detach().float().cpu()
+
         attentions = getattr(language_model_output, "attentions", None)
         if attentions is None:
             return None
@@ -946,7 +956,6 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         if action_horizon > 0:
             action_end = min(action_end, action_start + action_horizon * int(token_metadata.get("action_dim", ACTION_DIM)))
 
-        pruning_info = getattr(language_model_output, "pruning_info", None)
         kept_indices = pruning_info.get("kept_indices") if isinstance(pruning_info, dict) else None
         pruning_layer = pruning_info.get("pruning_layer") if isinstance(pruning_info, dict) else None
 
@@ -1034,6 +1043,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             "action_dim": int(token_metadata.get("action_dim", ACTION_DIM)),
             "return_attentions": bool(getattr(self, "return_attentions_for_cache", False) or use_temporal),
             "pact_budget_rates": self.pact_budget_rates,
+            "pact_variant": self.pact_variant,
             "pact_gamma": self.pact_gamma,
             "pact_theta0": self.pact_theta0,
             "pact_alpha_d": self.pact_alpha_d,
@@ -1151,15 +1161,15 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             input_embeddings, projected_patch_embeddings, attention_mask
         )
         
+        pact_rates = tuple(float(rate) for rate in getattr(self, "pact_budget_rates", ()))
+        dense_pact_baseline = bool(getattr(self, "use_pact_vla", False)) and bool(pact_rates) and all(
+            rate >= 1.0 for rate in pact_rates
+        )
         use_attention_pruning = bool(
             getattr(self, "use_fastv", False)
             or getattr(self, "use_vla_pruner", False)
             or getattr(self, "sparsevlm", False)
-        )
-        # Preserve the official OpenVLA-OFT eager/manual-attention path even for
-        # Vanilla.  Letting Vanilla alone stay on SDPA changes the continuous
-        # action-head outputs enough to collapse LIBERO success rates.
-        need_attentions = True
+        ) and not dense_pact_baseline
         if use_attention_pruning:
             if token_metadata is None:
                 raise ValueError("FastV/VLA-Pruner/SparseVLM requires OpenVLA-OFT token metadata.")
@@ -1176,7 +1186,7 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 inputs_embeds=multimodal_embeddings,
                 labels=None,
                 use_cache=True,
-                output_attentions=need_attentions,
+                output_attentions=True,
                 output_hidden_states=True,
                 return_dict=True,
                 fastv_config=self._build_fastv_config(token_metadata, inputs_embeds=multimodal_embeddings),
@@ -1187,27 +1197,30 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 input_ids=None,
                 attention_mask=multimodal_attention_mask,
                 position_ids=None,
-                past_key_values=past_key_values,
+                past_key_values=None,
                 inputs_embeds=multimodal_embeddings,
                 labels=None,
-                use_cache=True,
-                output_attentions=need_attentions,
+                use_cache=None,
+                output_attentions=False,
                 output_hidden_states=True,
                 return_dict=True,
             )
 
         # Extract hidden states for action tokens
         last_hidden_states = language_model_output.hidden_states[-1]  # (B, seq_len, D)
-        actions_hidden_states = last_hidden_states[
-            :,
-            - ACTION_DIM * NUM_ACTIONS_CHUNK - 1 : -1,
-            :,
-        ]  # (B, act_chunk_len, D)
+        pruning_info = getattr(language_model_output, "pruning_info", None)
+        was_pruned = isinstance(pruning_info, dict) and pruning_info.get("kept_indices") is not None
+        if was_pruned:
+            action_slice = slice(-ACTION_DIM * NUM_ACTIONS_CHUNK - 1, -1)
+        else:
+            action_start = NUM_PATCHES + NUM_PROMPT_TOKENS
+            action_slice = slice(action_start, action_start + ACTION_DIM * NUM_ACTIONS_CHUNK)
+        actions_hidden_states = last_hidden_states[:, action_slice, :]  # (B, act_chunk_len, D)
         last_caches = {
             "past_key_values": language_model_output.past_key_values,
             "attentions": language_model_output.attentions,
             "token_metadata": token_metadata,
-            "pruning_info": getattr(language_model_output, "pruning_info", None),
+            "pruning_info": pruning_info,
         }
         # Handle different prediction methods
         if action_head is not None:
@@ -1217,9 +1230,8 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             normalized_actions = normalized_actions.float().cpu().detach().numpy()
         else:
             # Discrete token-based prediction
-            action_logits = language_model_output.logits[:, - ACTION_DIM * NUM_ACTIONS_CHUNK - 1 : -1]
             predicted_action_token_ids = (
-                action_logits
+                language_model_output.logits[:, action_slice]
                 .argmax(dim=2)
                 .cpu()
                 .numpy()
